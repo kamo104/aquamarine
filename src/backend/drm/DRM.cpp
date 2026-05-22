@@ -55,7 +55,7 @@ static bool shouldTryRenderNodes() {
     return envEnabled("AQ_DRM_TRY_RENDER_NODES");
 }
 
-static constexpr auto DRM_RENDER_MINOR_NAME = "renderD";
+static constexpr char DRM_RENDER_MINOR_NAME[] = "renderD";
 static constexpr size_t DRM_PRIMARY_MINOR_NAME_LEN = sizeof(DRM_PRIMARY_MINOR_NAME) - 1;
 static constexpr size_t DRM_RENDER_MINOR_NAME_LEN = sizeof(DRM_RENDER_MINOR_NAME) - 1;
 
@@ -119,7 +119,7 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     std::deque<SP<CSessionDevice>> renderDevices;
     const bool                     tryRenderNodes = shouldTryRenderNodes();
     const auto                     explicitGpus = getenv("AQ_DRM_DEVICES");
-    const bool useRenderNodes = tryRenderNodes || explicitGpus;
+    const bool useRenderNodes = tryRenderNodes || (explicitGpus && *explicitGpus != '\0');
 
     int                            maxBuiltinPanels = 0;
     SP<CSessionDevice>             maxBuiltinPanelsGPU;
@@ -249,7 +249,7 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
                 backend->log(AQ_LOG_ERROR, std::format("drm: Explicit device {} not found", d));
         }
     } else {
-        if (maxBuiltinPanelsGPU && !cardDevices.empty() && cardDevices.front() != maxBuiltinPanelsGPU) {
+        if (maxBuiltinPanelsGPU && cardDevices.front() != maxBuiltinPanelsGPU) {
             std::erase(cardDevices, maxBuiltinPanelsGPU);
             cardDevices.push_front(maxBuiltinPanelsGPU);
         }
