@@ -55,6 +55,8 @@ static bool shouldTryRenderNodes() {
     return envEnabled("AQ_DRM_TRY_RENDER_NODES");
 }
 
+static constexpr auto DRM_RENDER_MINOR_NAME = "renderD";
+
 static udev_enumerate* enumDRMDevices(udev* udev) {
     auto enumerate = udev_enumerate_new(udev);
     if (!enumerate)
@@ -119,21 +121,21 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     SP<CSessionDevice>             maxBuiltinPanelsGPU;
 
     udev_list_entry_foreach(entry, udev_enumerate_get_list_entry(enumerate)) {
-        auto path   = udev_list_entry_get_name(entry);
-        auto device = udev_device_new_from_syspath(backend->session->udevHandle, path);
+        const auto* syspath = udev_list_entry_get_name(entry);
+        auto        device  = udev_device_new_from_syspath(backend->session->udevHandle, syspath);
         if (!device) {
-            backend->log(AQ_LOG_WARNING, std::format("drm: Skipping device {}", path ? path : "unknown"));
+            backend->log(AQ_LOG_WARNING, std::format("drm: Skipping device {}", syspath ? syspath : "unknown"));
             continue;
         }
 
-        backend->log(AQ_LOG_DEBUG, std::format("drm: Enumerated device {}", path ? path : "unknown"));
+        backend->log(AQ_LOG_DEBUG, std::format("drm: Enumerated device {}", syspath ? syspath : "unknown"));
 
         auto seat = udev_device_get_property_value(device, "ID_SEAT");
         if (!seat)
             seat = "seat0";
 
         if (!backend->session->seatName.empty() && backend->session->seatName != seat) {
-            backend->log(AQ_LOG_WARNING, std::format("drm: Skipping device {} because seat {} doesn't match our {}", path ? path : "unknown", seat, backend->session->seatName));
+            backend->log(AQ_LOG_WARNING, std::format("drm: Skipping device {} because seat {} doesn't match our {}", syspath ? syspath : "unknown", seat, backend->session->seatName));
             udev_device_unref(device);
             continue;
         }
@@ -146,14 +148,14 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
         }
 
         if (!udev_device_get_devnode(device)) {
-            backend->log(AQ_LOG_ERROR, std::format("drm: Skipping device {}, no devnode", path ? path : "unknown"));
+            backend->log(AQ_LOG_ERROR, std::format("drm: Skipping device {}, no devnode", syspath ? syspath : "unknown"));
             udev_device_unref(device);
             continue;
         }
 
         const auto* sysname = udev_device_get_sysname(device);
-        const bool   isCard  = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, strlen(DRM_PRIMARY_MINOR_NAME));
-        const bool   isRenderNode = sysname && !strncmp(sysname, "renderD", strlen("renderD"));
+        const bool isCard = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, strlen(DRM_PRIMARY_MINOR_NAME));
+        const bool isRenderNode = sysname && !strncmp(sysname, DRM_RENDER_MINOR_NAME, strlen(DRM_RENDER_MINOR_NAME));
 
         if (!isCard && !(tryRenderNodes && isRenderNode)) {
             udev_device_unref(device);
@@ -162,12 +164,14 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
 
         auto sessionDevice = CSessionDevice::openIfKMS(backend->session, udev_device_get_devnode(device));
         if (!sessionDevice) {
-            backend->log(AQ_LOG_ERROR, std::format("drm: Skipping device {}, not a KMS device", path ? path : "unknown"));
+            backend->log(AQ_LOG_ERROR, std::format("drm: Skipping device {}, not a KMS device", syspath ? syspath : "unknown"));
             udev_device_unref(device);
             continue;
         }
 
         if (isRenderNode) {
+            // Render-node candidates are used directly; they don't need a
+            // matching render node lookup because they already are one.
             renderDevices.push_back(sessionDevice);
         } else {
             sessionDevice->resolveMatchingRenderNode(device);
@@ -191,19 +195,15 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     udev_enumerate_unref(enumerate);
 
     std::vector<SP<CSessionDevice>> vecDevices;
-    std::deque<SP<CSessionDevice>>  devices;
-
-    if (tryRenderNodes) {
-        for (auto const& d : renderDevices) {
-            devices.push_back(d);
-        }
-    }
-    for (auto const& d : cardDevices) {
-        devices.push_back(d);
-    }
 
     auto                            explicitGpus = getenv("AQ_DRM_DEVICES");
     if (explicitGpus) {
+        std::deque<SP<CSessionDevice>> devices;
+        if (tryRenderNodes) {
+            devices.insert(devices.end(), renderDevices.begin(), renderDevices.end());
+        }
+        devices.insert(devices.end(), cardDevices.begin(), cardDevices.end());
+
         backend->log(AQ_LOG_DEBUG, std::format("drm: Explicit device list {}", explicitGpus));
         Hyprutils::String::CVarList explicitDevices(explicitGpus, 0, ':', true);
 
@@ -250,8 +250,9 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
             std::erase(cardDevices, maxBuiltinPanelsGPU);
             cardDevices.push_front(maxBuiltinPanelsGPU);
         }
-        for (auto const& d : devices) {
-            vecDevices.push_back(d);
+        vecDevices.insert(vecDevices.end(), cardDevices.begin(), cardDevices.end());
+        if (tryRenderNodes) {
+            vecDevices.insert(vecDevices.end(), renderDevices.begin(), renderDevices.end());
         }
     }
 
