@@ -116,6 +116,8 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     std::deque<SP<CSessionDevice>> cardDevices;
     std::deque<SP<CSessionDevice>> renderDevices;
     const bool                     tryRenderNodes = shouldTryRenderNodes();
+    const auto                     explicitGpus    = getenv("AQ_DRM_DEVICES");
+    const bool                     useRenderNodes  = tryRenderNodes || explicitGpus;
 
     int                            maxBuiltinPanels = 0;
     SP<CSessionDevice>             maxBuiltinPanelsGPU;
@@ -157,7 +159,7 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
         const bool isCard = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, strlen(DRM_PRIMARY_MINOR_NAME));
         const bool isRenderNode = sysname && !strncmp(sysname, DRM_RENDER_MINOR_NAME, strlen(DRM_RENDER_MINOR_NAME));
 
-        if (!isCard && !(tryRenderNodes && isRenderNode)) {
+        if (!isCard && !(useRenderNodes && isRenderNode)) {
             udev_device_unref(device);
             continue;
         }
@@ -196,10 +198,9 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
 
     std::vector<SP<CSessionDevice>> vecDevices;
 
-    auto                            explicitGpus = getenv("AQ_DRM_DEVICES");
     if (explicitGpus) {
         std::deque<SP<CSessionDevice>> devices;
-        if (tryRenderNodes) {
+        if (useRenderNodes) {
             devices.insert(devices.end(), renderDevices.begin(), renderDevices.end());
         }
         devices.insert(devices.end(), cardDevices.begin(), cardDevices.end());
@@ -251,7 +252,7 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
             cardDevices.push_front(maxBuiltinPanelsGPU);
         }
         vecDevices.insert(vecDevices.end(), cardDevices.begin(), cardDevices.end());
-        if (tryRenderNodes) {
+        if (useRenderNodes) {
             vecDevices.insert(vecDevices.end(), renderDevices.begin(), renderDevices.end());
         }
     }

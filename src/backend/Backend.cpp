@@ -170,7 +170,7 @@ bool Aquamarine::CBackend::start() {
         }
     }
 
-    if (!primaryAllocator && (implementations.empty() || implementations.at(0)->type() != AQ_BACKEND_NULL)) {
+    if (!primaryAllocator && std::ranges::any_of(implementations, [](const auto& impl) { return impl->type() != AQ_BACKEND_NULL; })) {
         log(AQ_LOG_CRITICAL, "Cannot open backend: no allocator available");
         return false;
     }
