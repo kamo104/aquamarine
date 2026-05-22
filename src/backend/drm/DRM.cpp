@@ -51,7 +51,11 @@ Aquamarine::CDRMBackend::CDRMBackend(SP<CBackend> backend_) : backend(backend_) 
     });
 }
 
-static udev_enumerate* enumDRMCards(udev* udev) {
+static bool shouldTryRenderNodes() {
+    return envEnabled("AQ_DRM_TRY_RENDER_NODES");
+}
+
+static udev_enumerate* enumDRMDevices(udev* udev) {
     auto enumerate = udev_enumerate_new(udev);
     if (!enumerate)
         return nullptr;
@@ -61,7 +65,6 @@ static udev_enumerate* enumDRMCards(udev* udev) {
     // https://github.com/wulf7/libudev-devd/issues/11
     udev_enumerate_add_match_property(enumerate, "DEVTYPE", "drm_minor");
 #endif
-    udev_enumerate_add_match_sysname(enumerate, DRM_PRIMARY_MINOR_NAME "[0-9]*");
 
     if (udev_enumerate_scan_devices(enumerate)) {
         udev_enumerate_unref(enumerate);
@@ -94,7 +97,7 @@ static int gpuNumBuiltinPanels(const SP<CSessionDevice> gpu) {
 }
 
 static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
-    auto enumerate = enumDRMCards(backend->session->udevHandle);
+    auto enumerate = enumDRMDevices(backend->session->udevHandle);
 
     if (!enumerate) {
         backend->log(AQ_LOG_ERROR, "drm: couldn't enumerate gpus with udev");
@@ -108,7 +111,9 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     }
 
     udev_list_entry*               entry = nullptr;
-    std::deque<SP<CSessionDevice>> devices;
+    std::deque<SP<CSessionDevice>> cardDevices;
+    std::deque<SP<CSessionDevice>> renderDevices;
+    const bool                     tryRenderNodes = shouldTryRenderNodes();
 
     int                            maxBuiltinPanels = 0;
     SP<CSessionDevice>             maxBuiltinPanelsGPU;
@@ -146,6 +151,15 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
             continue;
         }
 
+        const auto* sysname = udev_device_get_sysname(device);
+        const bool   isCard  = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, strlen(DRM_PRIMARY_MINOR_NAME));
+        const bool   isRenderNode = sysname && !strncmp(sysname, "renderD", strlen("renderD"));
+
+        if (!isCard && !(tryRenderNodes && isRenderNode)) {
+            udev_device_unref(device);
+            continue;
+        }
+
         auto sessionDevice = CSessionDevice::openIfKMS(backend->session, udev_device_get_devnode(device));
         if (!sessionDevice) {
             backend->log(AQ_LOG_ERROR, std::format("drm: Skipping device {}, not a KMS device", path ? path : "unknown"));
@@ -153,26 +167,40 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
             continue;
         }
 
-        sessionDevice->resolveMatchingRenderNode(device);
+        if (isRenderNode) {
+            renderDevices.push_back(sessionDevice);
+        } else {
+            sessionDevice->resolveMatchingRenderNode(device);
+
+            if (isBootVGA)
+                cardDevices.push_front(sessionDevice);
+            else
+                cardDevices.push_back(sessionDevice);
+
+            int numBuiltinPanels = gpuNumBuiltinPanels(sessionDevice);
+            backend->log(AQ_LOG_TRACE, std::format("drm: Device {} has {} builtin {}", sessionDevice->path, numBuiltinPanels, numBuiltinPanels == 1 ? "panel" : "panels"));
+            if (numBuiltinPanels > maxBuiltinPanels) {
+                maxBuiltinPanelsGPU = sessionDevice;
+                maxBuiltinPanels    = numBuiltinPanels;
+            }
+        }
 
         udev_device_unref(device);
-
-        if (isBootVGA)
-            devices.push_front(sessionDevice);
-        else
-            devices.push_back(sessionDevice);
-
-        int numBuiltinPanels = gpuNumBuiltinPanels(sessionDevice);
-        backend->log(AQ_LOG_TRACE, std::format("drm: Device {} has {} builtin {}", sessionDevice->path, numBuiltinPanels, numBuiltinPanels == 1 ? "panel" : "panels"));
-        if (numBuiltinPanels > maxBuiltinPanels) {
-            maxBuiltinPanelsGPU = sessionDevice;
-            maxBuiltinPanels    = numBuiltinPanels;
-        }
     }
 
     udev_enumerate_unref(enumerate);
 
     std::vector<SP<CSessionDevice>> vecDevices;
+    std::deque<SP<CSessionDevice>>  devices;
+
+    if (tryRenderNodes) {
+        for (auto const& d : renderDevices) {
+            devices.push_back(d);
+        }
+    }
+    for (auto const& d : cardDevices) {
+        devices.push_back(d);
+    }
 
     auto                            explicitGpus = getenv("AQ_DRM_DEVICES");
     if (explicitGpus) {
@@ -218,9 +246,9 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
                 backend->log(AQ_LOG_ERROR, std::format("drm: Explicit device {} not found", d));
         }
     } else {
-        if (maxBuiltinPanelsGPU && devices.front() != maxBuiltinPanelsGPU) {
-            std::erase(devices, maxBuiltinPanelsGPU);
-            devices.push_front(maxBuiltinPanelsGPU);
+        if (maxBuiltinPanelsGPU && !cardDevices.empty() && cardDevices.front() != maxBuiltinPanelsGPU) {
+            std::erase(cardDevices, maxBuiltinPanelsGPU);
+            cardDevices.push_front(maxBuiltinPanelsGPU);
         }
         for (auto const& d : devices) {
             vecDevices.push_back(d);
