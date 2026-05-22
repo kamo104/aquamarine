@@ -56,6 +56,8 @@ static bool shouldTryRenderNodes() {
 }
 
 static constexpr auto DRM_RENDER_MINOR_NAME = "renderD";
+static constexpr size_t DRM_PRIMARY_MINOR_NAME_LEN = sizeof(DRM_PRIMARY_MINOR_NAME) - 1;
+static constexpr size_t DRM_RENDER_MINOR_NAME_LEN = sizeof(DRM_RENDER_MINOR_NAME) - 1;
 
 static udev_enumerate* enumDRMDevices(udev* udev) {
     auto enumerate = udev_enumerate_new(udev);
@@ -116,8 +118,8 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
     std::deque<SP<CSessionDevice>> cardDevices;
     std::deque<SP<CSessionDevice>> renderDevices;
     const bool                     tryRenderNodes = shouldTryRenderNodes();
-    const auto                     explicitGpus    = getenv("AQ_DRM_DEVICES");
-    const bool                     useRenderNodes  = tryRenderNodes || explicitGpus;
+    const auto                     explicitGpus = getenv("AQ_DRM_DEVICES");
+    const bool useRenderNodes = tryRenderNodes || explicitGpus;
 
     int                            maxBuiltinPanels = 0;
     SP<CSessionDevice>             maxBuiltinPanelsGPU;
@@ -156,8 +158,8 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
         }
 
         const auto* sysname = udev_device_get_sysname(device);
-        const bool isCard = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, strlen(DRM_PRIMARY_MINOR_NAME));
-        const bool isRenderNode = sysname && !strncmp(sysname, DRM_RENDER_MINOR_NAME, strlen(DRM_RENDER_MINOR_NAME));
+        const bool isCard = sysname && !strncmp(sysname, DRM_PRIMARY_MINOR_NAME, DRM_PRIMARY_MINOR_NAME_LEN);
+        const bool isRenderNode = sysname && !strncmp(sysname, DRM_RENDER_MINOR_NAME, DRM_RENDER_MINOR_NAME_LEN);
 
         if (!isCard && !(useRenderNodes && isRenderNode)) {
             udev_device_unref(device);
