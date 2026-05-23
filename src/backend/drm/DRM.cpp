@@ -188,6 +188,70 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
 
     udev_enumerate_unref(enumerate);
 
+    // When AQ_NO_KMS_REQUIREMENT is set, also enumerate renderD devices
+    if (envEnabled("AQ_NO_KMS_REQUIREMENT")) {
+        auto renderEnumerate = udev_enumerate_new(backend->session->udevHandle);
+        if (renderEnumerate) {
+            udev_enumerate_add_match_subsystem(renderEnumerate, "drm");
+#ifdef __linux__
+            udev_enumerate_add_match_property(renderEnumerate, "DEVTYPE", "drm_minor");
+#endif
+            udev_enumerate_add_match_sysname(renderEnumerate, "renderD[0-9]*");
+            if (!udev_enumerate_scan_devices(renderEnumerate)) {
+                udev_list_entry* renderEntry = nullptr;
+                udev_list_entry_foreach(renderEntry, udev_enumerate_get_list_entry(renderEnumerate)) {
+                    auto path   = udev_list_entry_get_name(renderEntry);
+                    auto device = udev_device_new_from_syspath(backend->session->udevHandle, path);
+                    if (!device) {
+                        backend->log(AQ_LOG_WARNING, std::format("drm: Skipping render device {}", path ? path : "unknown"));
+                        continue;
+                    }
+
+                    auto devnode = udev_device_get_devnode(device);
+                    if (!devnode) {
+                        udev_device_unref(device);
+                        continue;
+                    }
+
+                    // Skip if this devnode is already in the list (e.g. opened as card's render node)
+                    bool skip = false;
+                    for (auto const& d : devices) {
+                        if (d->path == devnode) {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    if (skip) {
+                        udev_device_unref(device);
+                        continue;
+                    }
+
+                    auto seat = udev_device_get_property_value(device, "ID_SEAT");
+                    if (!seat)
+                        seat = "seat0";
+
+                    if (!backend->session->seatName.empty() && backend->session->seatName != seat) {
+                        udev_device_unref(device);
+                        continue;
+                    }
+
+                    backend->log(AQ_LOG_DEBUG, std::format("drm: Enumerated render device {}", devnode));
+
+                    auto sessionDevice = CSessionDevice::openIfKMS(backend->session, devnode);
+                    if (!sessionDevice) {
+                        backend->log(AQ_LOG_WARNING, std::format("drm: Skipping render device {}, not usable", devnode));
+                        udev_device_unref(device);
+                        continue;
+                    }
+
+                    devices.push_back(sessionDevice);
+                    udev_device_unref(device);
+                }
+            }
+            udev_enumerate_unref(renderEnumerate);
+        }
+    }
+
     std::vector<SP<CSessionDevice>> vecDevices;
 
     auto                            explicitGpus = getenv("AQ_DRM_DEVICES");
@@ -225,6 +289,15 @@ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
                     vecDevices.emplace_back(vd);
                     found = true;
                     break;
+                }
+            }
+
+            if (!found) {
+                auto sessionDevice = CSessionDevice::openIfKMS(backend->session, d);
+                if (sessionDevice) {
+                    backend->log(AQ_LOG_DEBUG, std::format("drm: Explicit device {} opened directly", d));
+                    vecDevices.emplace_back(sessionDevice);
+                    found = true;
                 }
             }
 
@@ -517,8 +590,12 @@ bool Aquamarine::CDRMBackend::checkFeatures() {
     }
 
     if (drmGetCap(gpu->fd, DRM_CAP_CRTC_IN_VBLANK_EVENT, &cap) || !cap) {
-        backend->log(AQ_LOG_ERROR, std::format("drm: DRM_CAP_CRTC_IN_VBLANK_EVENT unsupported"));
-        return false;
+        if (envEnabled("AQ_NO_KMS_REQUIREMENT")) {
+            backend->log(AQ_LOG_WARNING, "drm: DRM_CAP_CRTC_IN_VBLANK_EVENT unsupported, continuing");
+        } else {
+            backend->log(AQ_LOG_ERROR, std::format("drm: DRM_CAP_CRTC_IN_VBLANK_EVENT unsupported"));
+            return false;
+        }
     }
 
     if (drmGetCap(gpu->fd, DRM_CAP_TIMESTAMP_MONOTONIC, &cap) || !cap) {
@@ -527,8 +604,12 @@ bool Aquamarine::CDRMBackend::checkFeatures() {
     }
 
     if (drmSetClientCap(gpu->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
-        backend->log(AQ_LOG_ERROR, std::format("drm: DRM_CLIENT_CAP_UNIVERSAL_PLANES unsupported"));
-        return false;
+        if (envEnabled("AQ_NO_KMS_REQUIREMENT")) {
+            backend->log(AQ_LOG_WARNING, "drm: DRM_CLIENT_CAP_UNIVERSAL_PLANES unsupported, continuing");
+        } else {
+            backend->log(AQ_LOG_ERROR, std::format("drm: DRM_CLIENT_CAP_UNIVERSAL_PLANES unsupported"));
+            return false;
+        }
     }
 
     drmProps.supportsAsyncCommit = drmGetCap(gpu->fd, DRM_CAP_ASYNC_PAGE_FLIP, &cap) == 0 && cap == 1;
@@ -565,6 +646,10 @@ bool Aquamarine::CDRMBackend::checkFeatures() {
 bool Aquamarine::CDRMBackend::initResources() {
     auto resources = drmModeGetResources(gpu->fd);
     if (!resources) {
+        if (envEnabled("AQ_NO_KMS_REQUIREMENT")) {
+            backend->log(AQ_LOG_DEBUG, std::format("drm: drmModeGetResources failed, continuing without resources"));
+            return true;
+        }
         backend->log(AQ_LOG_ERROR, "drm: drmModeGetResources failed");
         return false;
     }
@@ -607,12 +692,14 @@ bool Aquamarine::CDRMBackend::initResources() {
 
     if (crtcs.size() > 32) {
         backend->log(AQ_LOG_CRITICAL, "drm: Cannot support more than 32 CRTCs");
+        drmModeFreeResources(resources);
         return false;
     }
 
     auto planeResources = drmModeGetPlaneResources(gpu->fd);
     if (!planeResources) {
         backend->log(AQ_LOG_ERROR, "drm: drmModeGetPlaneResources failed");
+        drmModeFreeResources(resources);
         return false;
     }
 
@@ -1031,7 +1118,10 @@ void Aquamarine::CDRMBackend::scanConnectors() {
 
     auto resources = drmModeGetResources(gpu->fd);
     if (!resources) {
-        backend->log(AQ_LOG_ERROR, std::format("drm: Scanning connectors for {} failed", gpu->path));
+        if (envEnabled("AQ_NO_KMS_REQUIREMENT"))
+            backend->log(AQ_LOG_DEBUG, std::format("drm: Scanning connectors for {} failed, no KMS", gpu->path));
+        else
+            backend->log(AQ_LOG_ERROR, std::format("drm: Scanning connectors for {} failed", gpu->path));
         return;
     }
 
